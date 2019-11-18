@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html>
+
+    <head>
+        <meta http-equiv="Content-Type" content="text/html; charset=utf-8"/>
+        <title>Phoenix Space Adventure</title>
+
+        <style>
+            @font-face{
+                font-family:'digital-clock-font';
+                src: url('models/fonts/digital-dream/DIGITALDREAMFAT.ttf');
+            }
+
+            @font-face{
+                font-family:'fire-text-font';
+                src: url('models/fonts/questrial/Questrial-Regular.ttf');
+            }
+
+            @font-face{
+                font-family:'project-font';
+                src: url('models/fonts/behtix/Behtix/Behtix.ttf');
+            }
+
+            @font-face{
+                font-family:'angel-font';
+                src: url('models/fonts/los-angeles/Los-Angeles.ttf');
+            }
+
+            @font-face{
+                font-family:'go-font';
+                src: url('models/fonts/trackers/Trackers.ttf');
+            }
+
+            html, body {
+                overflow: hidden;
+                width: 100%;
+                height: 100%;
+                margin: 0;
+                padding: 0;
+                font-family:'project-font';
+                text-align: center;
+                line-height: 20vh;
+            }
+
+            #renderCanvas {
+                width: 100%;
+                height: 100%;
+                touch-action: none;
+            }
+
+            .slider {
+                appearance: none; 
+                -webkit-appearance: none; 
+                -moz-appearance: none;
+                width: 15vw;
+                height: 2vh;
+                background: url('models/textures/colourscalenew.jpg');
+                border-radius: 10px;
+                box-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000;
+            }
+
+            .slider::-webkit-slider-thumb {
+                appearance: none; 
+                -webkit-appearance: none; 
+                width: 1vw;
+                height: 2vh;
+                border-radius: 50%;
+                background: black;
+                cursor: grab;
+                outline-width: 0%;
+            }
+
+            .slider::-moz-range-thumb {
+                width: 1vw;
+                height: 2vh;
+                border-radius: 50%;
+                background: black;
+                cursor: grab;
+                outline-width: 0%;
+            }
+
+        </style>
+
+
+		<script type="x-shader/x-vertex" id="vertexshader">
+			varying vec2 vUv;
+			void main() {
+				vUv = uv;
+				gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+			}
+		</script>
+
+		<script type="x-shader/x-fragment" id="fragmentshader">
+			uniform sampler2D baseTexture;
+			uniform sampler2D bloomTexture;
+			varying vec2 vUv;
+			vec4 getTexture( sampler2D texelToLinearTexture ) {
+				return mapTexelToLinear( texture2D( texelToLinearTexture , vUv ) );
+			}
+			void main() {
+				gl_FragColor = ( getTexture( baseTexture ) + vec4( 1.0 ) * getTexture( bloomTexture ) );
+			}
+        </script>
+        
+
+		<script type="x-shader/x-fragment" id="PCSS">
+            #define LIGHT_WORLD_SIZE 0.005
+            #define LIGHT_FRUSTUM_WIDTH 3.75
+            #define LIGHT_SIZE_UV (LIGHT_WORLD_SIZE / LIGHT_FRUSTUM_WIDTH)
+            #define NEAR_PLANE 9.5
+            #define NUM_SAMPLES 17
+            #define NUM_RINGS 11
+            #define BLOCKER_SEARCH_NUM_SAMPLES NUM_SAMPLES
+            #define PCF_NUM_SAMPLES NUM_SAMPLES
+            vec2 poissonDisk[NUM_SAMPLES];
+            void initPoissonSamples( const in vec2 randomSeed ) {
+                float ANGLE_STEP = PI2 * float( NUM_RINGS ) / float( NUM_SAMPLES );
+                float INV_NUM_SAMPLES = 1.0 / float( NUM_SAMPLES );
+                float angle = rand( randomSeed ) * PI2;
+                float radius = INV_NUM_SAMPLES;
+                float radiusStep = radius;
+                for( int i = 0; i < NUM_SAMPLES; i ++ ) {
+                    poissonDisk[i] = vec2( cos( angle ), sin( angle ) ) * pow( radius, 0.75 );
+                    radius += radiusStep;
+                    angle += ANGLE_STEP;
+                }
+            }
+            float penumbraSize( const in float zReceiver, const in float zBlocker ) { 
+                return (zReceiver - zBlocker) / zBlocker;
+            }
+            float findBlocker( sampler2D shadowMap, const in vec2 uv, const in float zReceiver ) {
+                float searchRadius = LIGHT_SIZE_UV * ( zReceiver - NEAR_PLANE ) / zReceiver;
+                float blockerDepthSum = 0.0;
+                int numBlockers = 0;
+                for( int i = 0; i < BLOCKER_SEARCH_NUM_SAMPLES; i++ ) {
+                    float shadowMapDepth = unpackRGBAToDepth(texture2D(shadowMap, uv + poissonDisk[i] * searchRadius));
+                    if ( shadowMapDepth < zReceiver ) {
+                        blockerDepthSum += shadowMapDepth;
+                        numBlockers ++;
+                    }
+                }
+                if( numBlockers == 0 ) return -1.0;
+                return blockerDepthSum / float( numBlockers );
+            }
+            float PCF_Filter(sampler2D shadowMap, vec2 uv, float zReceiver, float filterRadius ) {
+                float sum = 0.0;
+                for( int i = 0; i < PCF_NUM_SAMPLES; i ++ ) {
+                    float depth = unpackRGBAToDepth( texture2D( shadowMap, uv + poissonDisk[ i ] * filterRadius ) );
+                    if( zReceiver <= depth ) sum += 1.0;
+                }
+                for( int i = 0; i < PCF_NUM_SAMPLES; i ++ ) {
+                    float depth = unpackRGBAToDepth( texture2D( shadowMap, uv + -poissonDisk[ i ].yx * filterRadius ) );
+                    if( zReceiver <= depth ) sum += 1.0;
+                }
+                return sum / ( 2.0 * float( PCF_NUM_SAMPLES ) );
+            }
+            float PCSS ( sampler2D shadowMap, vec4 coords ) {
+                vec2 uv = coords.xy;
+                float zReceiver = coords.z; 
+                initPoissonSamples( uv );
+                float avgBlockerDepth = findBlocker( shadowMap, uv, zReceiver );
+                if( avgBlockerDepth == -1.0 ) return 1.0;
+                float penumbraRatio = penumbraSize( zReceiver, avgBlockerDepth );
+                float filterRadius = penumbraRatio * LIGHT_SIZE_UV * NEAR_PLANE / zReceiver;
+                return PCF_Filter( shadowMap, uv, zReceiver, filterRadius );
+            }
+    </script>
+
+    <script type="x-shader/x-fragment" id="PCSSGetShadow">
+        return PCSS( shadowMap, shadowCoord );
+    </script>
+
+
+    <script type="x-shader/x-vertex" id="vertexshader-particles">
+        attribute float size;
+        varying vec3 vColor;
+        void main() {
+            vColor = color;
+            vec4 mvPosition = modelViewMatrix * vec4( position, 1.0 );
+            gl_PointSize = size * ( 300.0 / -mvPosition.z );
+            gl_Position = projectionMatrix * mvPosition;
+        }
+    </script>
+
+    <script type="x-shader/x-fragment" id="fragmentshader-particles">
+        uniform sampler2D pointTexture;
+        varying vec3 vColor;
+        void main() {
+            gl_FragColor = vec4( vColor, 1.0 );
+            gl_FragColor = gl_FragColor * texture2D( pointTexture, gl_PointCoord );
+        }
+    </script>
+
+
+        <div id="container" style="width:100vw; height:100vh; position: absolute; left:0%; top:0%"></div>
+        
+        <div id="lives" style="position: absolute; left:37vw; top:-5.25vh; visibility: hidden; color: aquamarine; font-size: 160%;"></div>
+        <div id="eggs" style="position: absolute; right:37vw; top:-5.25vh; visibility: hidden; color: aquamarine; font-size: 160%;"></div>
+
+        <div id="velocity" style="position: absolute; left:6vw; top:-5.25vh; color: black; font-family: 'digital-clock-font'; font-size: 200%; visibility: hidden; text-shadow: -0.5px -0.5px 0 #fff, 0.5px -0.5px 0 #fff, -0.5px 0.5px 0 #fff, 0.5px 0.5px 0 #fff;"></div>        
+        
+        <div id="middle_message" style="width:100vw; position: absolute; top:6vh; color: black; font-family: 'digital-clock-font'; font-size: 200%; visibility: hidden; text-shadow: -0.5px -0.5px 0 #fff, 0.5px -0.5px 0 #fff, -0.5px 0.5px 0 #fff, 0.5px 0.5px 0 #fff;"></div>
+
+        <div id="pause_title" style="width:100vw; position: absolute; top:6vh; color: whitesmoke; font-size: 400%; visibility: hidden; text-shadow: -2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000, 2px 2px 0 #000;">Pause</div>
+        <div id="music_change" style="position: absolute; left:18vw; top:63.5vh; color: whitesmoke; font-size: 350%; visibility: hidden; text-shadow: -2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000, 2px 2px 0 #000;">Music</div>
+        <div id="soundEffects_change" style="position: absolute; right:13vw; top:63.5vh; color: whitesmoke; font-size: 350%; visibility: hidden; text-shadow: -2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000, 2px 2px 0 #000;">Sound Effects</div>
+
+        <div id="left" style="position: absolute; right:6.5vw; top:-5.25vh; color: black; font-family: 'digital-clock-font'; font-size: 200%; visibility: hidden; text-shadow: -0.5px -0.5px 0 #fff, 0.5px -0.5px 0 #fff, -0.5px 0.5px 0 #fff, 0.5px 0.5px 0 #fff;">Light years</div>
+        <div id="time" style="position: absolute; right:8vw; top:1vh; color: black; font-family: 'digital-clock-font'; font-size: 200%; visibility: hidden; text-shadow: -0.5px -0.5px 0 #fff, 0.5px -0.5px 0 #fff, -0.5px 0.5px 0 #fff, 0.5px 0.5px 0 #fff;"></div>
+
+        <div id="spitting_fire_limit1" style="position: absolute; left:5vw; top:-5.25vh; color: black; font-family: 'digital-clock-font'; font-size: 200%; visibility: hidden; text-shadow: -0.5px -0.5px 0 #fff, 0.5px -0.5px 0 #fff, -0.5px 0.5px 0 #fff, 0.5px 0.5px 0 #fff;">Spitting Fire</div>
+        <div id="spitting_fire_limit2" style="position: absolute; left:8.5vw; top:1vh; color: black; font-family: 'digital-clock-font'; font-size: 200%; visibility: hidden; text-shadow: -0.5px -0.5px 0 #fff, 0.5px -0.5px 0 #fff, -0.5px 0.5px 0 #fff, 0.5px 0.5px 0 #fff;"></div>
+
+        <div id="reset_game" style="width:100vw; position: absolute; top:62.5vh; color: whitesmoke; font-size: 350%; visibility: hidden"></div>
+
+        <div id="init_statement" style="width:100vw; position: absolute; top:25vh; color: whitesmoke; font-size: 500%; visibility: hidden; text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000;">Phoenix Space Adventure</div>
+
+        <div id="angelwings" style="width:100vw; position: absolute; top:32vh; color: whitesmoke; font-size: 1000%; visibility: hidden; font-family: angel-font">AngelWings<br>presents</div>
+
+        <div id="better" style="width:100vw; height:100vh; position: absolute; top:12.25vh; color: whitesmoke; font-size: 650%; visibility: hidden;">
+            For the best experience<br>
+            turn on the volume,<br>
+            charge your computer,<br>
+            and go full screen (b)
+        </div>
+
+        <div id="difficulty" style="width:100vw; position: absolute; top:50vh; color: whitesmoke; font-size: 400%; visibility: hidden; text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000;">Choose a difficulty:</div>
+        <div id="version_statement" style="width:100vw; position: absolute; top:50vh; color: whitesmoke; font-size: 400%; visibility: hidden; text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000;">Choose a version:</div>
+
+        <div id="letsgo" style="width:100vw; position: absolute; top:5vh; color: whitesmoke; font-size: 650%; visibility: hidden; font-family: go-font">Let's fly</div>
+        
+        <div id="commands" style="width:100vw; position: absolute; top:-3vh; color: whitesmoke; font-size: 400%; visibility: hidden; text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000;">Commands</div>
+        
+        <div id="thanks" style="width:100vw; position: absolute; top:1vh; color: whitesmoke; font-size: 400%; visibility: hidden">Thanks for playing!</div>
+        
+        <div id="tutorial_title" style="width:100vw; position: absolute; top:-3vh; color: whitesmoke; font-size: 400%; visibility: hidden; text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000;">Tutorial</div>
+        <div id="tutorial_text" style="line-height: 7vh; width:100vw; position: absolute; top:33vh; color: whitesmoke; font-size: 250%; visibility: hidden; text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000;">
+            Eggs have been hidden in the balls.<br>
+            You have to enter a ball to earn them.<br>
+            Avoid the obstacles to reach the eggs.<br>
+            In each ball you can explode obstacles but<br>
+            be careful that the fire may extinguish after a while.<br>
+            Gather as many eggs as you can.<br><br>
+            Warning: the game is heavy so may or may not<br>
+            slow down either the animations or the computer.
+        </div>
+                
+        <div id="on_off" style="width:100vw; position: absolute; top:5vh; color: whitesmoke; font-size: 450%; visibility: hidden; text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000;">On/Off</div>
+        
+        <div id="hold" style="width:100vw; position: absolute; top:23vh; color: whitesmoke; font-size: 250%; visibility: hidden; text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000;">* = You may hold these buttons</div>
+        
+        <div id="w" style="position: absolute; left:20vw; top:30.5vh; color: whitesmoke; font-size: 200%; visibility: hidden; text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000;">forward *</div>
+        <div id="s" style="position: absolute; left:19vw; top:59.8vh; color: whitesmoke; font-size: 200%; visibility: hidden; text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000;">backwards *</div>
+        <div id="a" style="position: absolute; left:7.5vw; top:50vh; color: whitesmoke; font-size: 200%; visibility: hidden; text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000;">left *</div>
+        <div id="d" style="position: absolute; left:32.5vw; top:50vh; color: whitesmoke; font-size: 200%; visibility: hidden; text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000;">right *</div>
+        <div id="r" style="position: absolute; left:49vw; top:30.5vh; color: whitesmoke; font-size: 200%; visibility: hidden; text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000;">up *</div>
+        <div id="f" style="position: absolute; left:48vw; top:59.8vh; color: whitesmoke; font-size: 200%; visibility: hidden; text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000;">down *</div>
+        <div id="k" style="position: absolute; left:33vw; top:76vh; color: whitesmoke; font-size: 200%; visibility: hidden; text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000;">spitting fire *</div>
+        <div id="b" style="position: absolute; left:58vw; top:76vh; color: whitesmoke; font-size: 200%; visibility: hidden; text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000;">full screen</div>
+        <div id="up" style="position: absolute; left:66vw; top:30.5vh; color: whitesmoke; font-size: 200%; visibility: hidden; text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000;">increase velocity *</div>
+        <div id="down" style="position: absolute; left:66vw; top:59.8vh; color: whitesmoke; font-size: 200%; visibility: hidden; text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000;">decrease velocity *</div>
+        <div id="t" style="position: absolute; left:2vw; bottom:2vh; color: whitesmoke; font-size: 200%; visibility: hidden; text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000;">tutorial (t)</div>
+        <div id="c" style="position: absolute; left:8.2vw; bottom:-4.5vh; color: whitesmoke; font-size: 200%; visibility: hidden; text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000;">commands (c)</div>
+        <div id="p" style="position: absolute; right:8.5vw; bottom:-4.5vh; color: whitesmoke; font-size: 200%; visibility: hidden; text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000;">pause (p)</div>
+        <div id="e" style="position: absolute; right:2vw; bottom:2vh; color: whitesmoke; font-size: 200%; visibility: hidden; text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000;">exit (u)</div>
+        <div id="mute" style="width:100vw; position: absolute; bottom:5vh; color: whitesmoke; font-size: 200%; visibility: hidden; text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000;">mute</div>
+        
+        <div id="changeVersionButton" style="width:100vw; position: absolute; top:20vh; visibility: hidden;">
+            <input onclick="changeVersion()" type="button" value="Change to Full version" id="version_pause" style="color: whitesmoke; font-size: 350%; background: url('models/textures/night_sky.jpg') no-repeat; border-radius: 10px"></input>
+        </div>
+        <div id="changeMuteButton" style="width:100vw; position: absolute; top:36vh; visibility: hidden;">
+            <input onclick="changeMuteButton()" type="button" value="Mute" id="mute_pause" style="color: whitesmoke; font-size: 350%; background: url('models/textures/night_sky.jpg') no-repeat; border-radius: 10px"></input>
+        </div>
+        <button id="tutorial_pause" style="position: absolute; left:26vw; top:38.5vh; color: whitesmoke; font-size: 350%; visibility: hidden; background: url('models/textures/night_sky.jpg') no-repeat; border-radius: 10px">Tutorial</button>
+        <button id="commands_pause" style="position: absolute; left:16vw; top:54.5vh; color: whitesmoke; font-size: 350%; visibility: hidden; background: url('models/textures/night_sky.jpg') no-repeat; border-radius: 10px">Commands</button>
+        <button id="resume_pause" style="position: absolute; right:26vw; top:38.5vh; color: whitesmoke; font-size: 350%; visibility: hidden; background: url('models/textures/night_sky.jpg') no-repeat; border-radius: 10px">Resume</button>
+        <button id="exit_pause" style="position: absolute; right:23vw; top:54.5vh; color: whitesmoke; font-size: 350%; visibility: hidden; background: url('models/textures/night_sky.jpg') no-repeat; border-radius: 10px">Exit</button>
+        
+        <div id="play_button" style="width: 100vw; position: absolute; bottom:20vh; visibility: hidden;">
+            <button id="start" style="color: whitesmoke; font-size: 350%; background: black; border-radius: 10px">Play</button>
+        </div>        
+        
+        <div id="difficulties_buttons" style="width: 100vw; position: absolute; bottom: 10vh; visibility: hidden;">
+            <button id="easy" style="margin-inline: 10px; color: whitesmoke; font-size: 350%; background: black; border-radius: 10px">Easy</button>
+            <button id="medium" style="margin-inline: 10px; color: whitesmoke; font-size: 350%; background: black; border-radius: 10px">Medium</button>
+            <button id="hard" style="margin-inline: 10px; color: whitesmoke; font-size: 350%; background: black; border-radius: 10px">Hard</button>
+        </div>        
+
+        <div id="versions_buttons" style="width: 100vw; position: absolute; bottom: 10vh; visibility: hidden;">
+            <button id="lite" style="margin-inline: 10px; color: whitesmoke; font-size: 350%; background: black; border-radius: 10px">Lite</button>
+            <button id="full" style="margin-inline: 10px; color: whitesmoke; font-size: 350%; background: black; border-radius: 10px">Full</button>
+        </div>
+        
+        <button id="tutorial_button" style="position: absolute; left:2vw; bottom:3vh; color: whitesmoke; font-size: 200%; visibility: hidden; background: url('models/textures/night_sky.jpg') no-repeat; border-radius: 10px">t</button>
+        <button id="commands_button" style="position: absolute; left:5vw; bottom:3vh; color: whitesmoke; font-size: 200%; visibility: hidden; background: url('models/textures/night_sky.jpg') no-repeat; border-radius: 10px">c</button>
+        <button id="exit_button" style="position: absolute; right:2vw; bottom:3vh; color: whitesmoke; font-size: 200%; visibility: hidden; background: url('models/textures/night_sky.jpg') no-repeat; border-radius: 10px">e</button>
+        <button id="pause_button" style="position: absolute; right:5vw; bottom:3vh; color: whitesmoke; font-size: 200%; visibility: hidden; background: url('models/textures/night_sky.jpg') no-repeat; border-radius: 10px">p</button>
+        
+        <div id="new_game_button" style="width: 100vw; position: absolute; bottom:0vh; visibility: hidden;">
+            <button id="new_game" style="color: whitesmoke; font-size: 200%; background: black">Start a new game</button>
+        </div>        
+
+        <input type="range" class="slider" min="0" max="100" value="100" id="music_range" style="position: absolute; left:15vw; top:79.5vh; visibility: hidden;">
+
+        <input type="range" class="slider" min="0" max="100" value="100" id="soundEffects_range" style="position: absolute; right:16vw; top:79.5vh; visibility: hidden;">
+
+        <canvas id="game_canvas" style="width: 100%; height: 100%;" touch-action="none"></canvas>
+
+        <script type="text/javascript" src="lib/Three.js"></script>
+
+        <script type="text/javascript" src="lib/GLTFLoader.js"></script>
+
+        <script type="text/javascript" src="lib/Reflector.js"></script>
+        <script type="text/javascript" src="lib/Refractor.js"></script>
+
+        <script type="text/javascript" src="lib/EffectComposer.js"></script>
+        <script type="text/javascript" src="lib/RenderPass.js"></script>
+        <script type="text/javascript" src="lib/ShaderPass.js"></script>
+        <script type="text/javascript" src="lib/UnrealBloomPass.js"></script>
+        <script type="text/javascript" src="lib/LuminosityHighPassShader.js"></script>
+        <script type="text/javascript" src="lib/CopyShader.js"></script>
+
+        <script type="text/javascript" src="lib/Fire.js"></script>
+
+        <script type="text/javascript" src="lib/GodRaysShader.js"></script>
+
+        <script type="text/javascript" src="phoenix.js"></script>
+        <script type="text/javascript" src="first_phase.js"></script>
+        <script type="text/javascript" src="insideBlackHole.js"></script>
+        <script type="text/javascript" src="insideBall.js"></script>
+        <script type="text/javascript" src="pages.js"></script>
+        <script type="text/javascript" src="game.js"></script>
+        
+    </head>
+
+   <body>
+
+
+   </body>
+
+</html>
