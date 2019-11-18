@@ -1,1 +1,2 @@
-# interactive_graphics_finalproject_phoenixspaceadventure_angelwings
+# finalproject-angelwings
+# https://sapienzainteractivegraphicscourse.github.io/finalproject-angelwings/
